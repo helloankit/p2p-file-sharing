@@ -3,9 +3,9 @@ import { io } from 'socket.io-client';
 
 const CHUNK_SIZE = 16 * 1024; // 16KB chunks
 
-// Hardcode signaling server to the IP of the host machine
-// Since we are running locally, we can use window.location.hostname
-const SIGNALING_URL = `http://${window.location.hostname}:3001`;
+// When hosted, connect to the exact same origin we are being served from
+// If in dev mode, connect to localhost:3001
+const SIGNALING_URL = import.meta.env.DEV ? `http://${window.location.hostname}:3001` : window.location.origin;
 
 function App() {
   const [socket, setSocket] = useState(null);
@@ -161,8 +161,24 @@ function App() {
 
   const sendFile = (targetId, file) => {
     const channel = dataChannels.current[targetId];
+    // Ensure connection is established before sending
     if (!channel || channel.readyState !== 'open') {
-      alert('Connection not established. Please click "Connect" first or wait for it to open.');
+      console.log('Connection not open, attempting to connect first...');
+      
+      // Auto connect if not connected
+      connectToPeer(targetId);
+      
+      // Set up a listener for when the channel opens
+      const checkConnection = setInterval(() => {
+        const checkChannel = dataChannels.current[targetId];
+        if (checkChannel && checkChannel.readyState === 'open') {
+          clearInterval(checkConnection);
+          sendFile(targetId, file); // Retry sending
+        }
+      }, 500);
+      
+      // Timeout after 10 seconds
+      setTimeout(() => clearInterval(checkConnection), 10000);
       return;
     }
 
@@ -227,7 +243,7 @@ function App() {
       <div className="bg-white rounded-2xl shadow-xl p-8">
         <div className="flex items-center justify-between mb-8 pb-6 border-b border-gray-100">
           <div>
-            <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">LocalDrop</h1>
+            <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">Shivangee's personal assistant</h1>
             <p className="text-gray-500 mt-2">Share files securely over your local network.</p>
           </div>
           <div className="text-right">
