@@ -1,0 +1,12 @@
+{
+  "name": "p2p-file-sharing",
+  "version": "1.0.0",
+  "description": "Local P2P File Sharing App",
+  "scripts": {
+    "start": "cd server && npm start",
+    "build": "cd server && npm install && npm run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
