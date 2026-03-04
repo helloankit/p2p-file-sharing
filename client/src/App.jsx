@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
+import JSZip from 'jszip';
 
 const CHUNK_SIZE = 16 * 1024; // 16KB chunks
 
@@ -177,8 +178,14 @@ function App() {
     socket.emit('signal', { targetId, signalData: pc.localDescription });
   };
 
-  const sendFiles = (targetId, filesArray) => {
+  const sendFiles = async (targetId, filesArray) => {
     if (!filesArray || filesArray.length === 0) return;
+
+    // Prevent starting a new transfer while one is already in progress
+    if (transfers[targetId] && !transfers[targetId].completed) {
+      alert("A transfer is already in progress with this device. Please wait for it to finish.");
+      return;
+    }
 
     const channel = dataChannels.current[targetId];
     
@@ -203,38 +210,47 @@ function App() {
       return;
     }
 
+    // Process files: If multiple, zip them first.
+    let fileToSend = filesArray[0];
+    
+    if (filesArray.length > 1) {
+      setTransfers(prev => ({
+        ...prev,
+        [targetId]: { 
+          fileName: 'Zipping files...', 
+          progress: 0, 
+          direction: 'sending',
+          completed: false,
+          isZipping: true
+        }
+      }));
+
+      const zip = new JSZip();
+      filesArray.forEach(f => {
+        zip.file(f.name, f);
+      });
+      
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      fileToSend = new File([zipBlob], `LocalDrop_${filesArray.length}_files.zip`, { type: 'application/zip' });
+    }
+
+    // Single file to send either way now
     setTransfers(prev => ({
       ...prev,
       [targetId]: { 
-        files: filesArray, 
-        currentFileIndex: 0, 
-        fileName: filesArray[0].name, 
+        fileName: fileToSend.name, 
         progress: 0, 
         direction: 'sending',
-        completed: false
+        completed: false,
+        isZipping: false
       }
     }));
 
-    sendNextFile(targetId, filesArray, 0);
+    sendFileData(targetId, fileToSend);
   };
 
-  const sendNextFile = (targetId, filesArray, index) => {
-    if (index >= filesArray.length) {
-      // All files sent
-      setTransfers(prev => ({
-        ...prev,
-        [targetId]: { ...prev[targetId], progress: 100, completed: true }
-      }));
-      return;
-    }
-
-    const file = filesArray[index];
+  const sendFileData = (targetId, file) => {
     const channel = dataChannels.current[targetId];
-
-    setTransfers(prev => ({
-      ...prev,
-      [targetId]: { ...prev[targetId], currentFileIndex: index, fileName: file.name, progress: 0 }
-    }));
 
     // Send metadata first
     const metadata = { name: file.name, size: file.size, type: file.type };
@@ -264,20 +280,41 @@ function App() {
       if (offset < file.size) {
         // Handle backpressure
         if (channel.bufferedAmount > channel.bufferedAmountLowThreshold) {
+          const waitBuffer = () => {
+            if (channel.bufferedAmount <= channel.bufferedAmountLowThreshold) {
+              readNextChunk();
+            } else {
+              // Poll if the event listener fails
+              setTimeout(waitBuffer, 50);
+            }
+          };
+          
           channel.onbufferedamountlow = () => {
             channel.onbufferedamountlow = null;
             readNextChunk();
           };
+          
+          // Fallback if event doesn't fire
+          setTimeout(waitBuffer, 100);
         } else {
           readNextChunk();
         }
       } else {
         // EOF for this file
-        channel.send(JSON.stringify({ type: 'eof' }));
-        // Wait a tiny bit then send next file to avoid overwhelming the channel buffer
-        setTimeout(() => {
-          sendNextFile(targetId, filesArray, index + 1);
-        }, 100);
+        
+        // Wait for buffer to completely drain before sending EOF
+        const finishTransfer = () => {
+          if (channel.bufferedAmount === 0) {
+            channel.send(JSON.stringify({ type: 'eof' }));
+            setTransfers(prev => ({
+              ...prev,
+              [targetId]: { ...prev[targetId], progress: 100, completed: true }
+            }));
+          } else {
+            setTimeout(finishTransfer, 50);
+          }
+        };
+        finishTransfer();
       }
     };
 
@@ -419,6 +456,7 @@ function App() {
                       id={`file-${peer.id}`} 
                       className="hidden" 
                       multiple
+                      disabled={transfers[peer.id] && !transfers[peer.id].completed}
                       onChange={(e) => {
                         if (e.target.files.length > 0) {
                           sendFiles(peer.id, Array.from(e.target.files));
@@ -428,7 +466,11 @@ function App() {
                     />
                     <label 
                       htmlFor={`file-${peer.id}`}
-                      className="w-full flex items-center justify-center space-x-2 bg-gray-50 hover:bg-gray-100 text-gray-700 py-3 rounded-lg cursor-pointer transition-colors border border-gray-200"
+                      className={`w-full flex items-center justify-center space-x-2 bg-gray-50 py-3 rounded-lg border border-gray-200 transition-colors ${
+                        (transfers[peer.id] && !transfers[peer.id].completed) 
+                          ? 'opacity-50 cursor-not-allowed' 
+                          : 'cursor-pointer hover:bg-gray-100 text-gray-700'
+                      }`}
                     >
                       <svg className="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
@@ -440,20 +482,16 @@ function App() {
                   {transfers[peer.id] && (
                     <div className="absolute inset-0 bg-white/95 backdrop-blur-sm p-6 flex flex-col justify-center border rounded-xl top-0 left-0 right-0 bottom-0 z-10 transition-opacity">
                       <div className="text-center mb-4">
-                        <p className="text-sm font-semibold text-gray-800 truncate mb-1" title={transfers[peer.id].fileName}>
-                          {transfers[peer.id].direction === 'sending' ? 'Sending: ' : 'Receiving: '}
+                        <p className={`text-sm font-semibold truncate mb-1 ${transfers[peer.id].fileName.includes('Zipping') ? 'text-indigo-600 animate-pulse' : 'text-gray-800'}`} title={transfers[peer.id].fileName}>
+                          {transfers[peer.id].direction === 'sending' && !transfers[peer.id].isZipping ? 'Sending: ' : ''}
+                          {transfers[peer.id].direction === 'receiving' ? 'Receiving: ' : ''}
                           {transfers[peer.id].fileName}
                         </p>
-                        {transfers[peer.id].files && transfers[peer.id].files.length > 1 && (
-                          <p className="text-xs text-gray-500 mb-1">
-                            File {transfers[peer.id].currentFileIndex + 1} of {transfers[peer.id].files.length}
-                          </p>
-                        )}
                         <p className="text-xs text-blue-600 font-medium">{transfers[peer.id].progress}%</p>
                       </div>
                       <div className="w-full bg-gray-100 rounded-full h-2.5 overflow-hidden">
                         <div 
-                          className="bg-blue-600 h-2.5 rounded-full transition-all duration-300 ease-out" 
+                          className={`h-2.5 rounded-full transition-all duration-300 ease-out ${transfers[peer.id].isZipping ? 'bg-indigo-500' : 'bg-blue-600'}`} 
                           style={{ width: `${transfers[peer.id].progress}%` }}
                         ></div>
                       </div>
