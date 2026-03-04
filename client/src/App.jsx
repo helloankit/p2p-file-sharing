@@ -9,6 +9,7 @@ const SIGNALING_URL = import.meta.env.DEV ? `http://${window.location.hostname}:
 
 function App() {
   const [socket, setSocket] = useState(null);
+  const [userName, setUserName] = useState(() => localStorage.getItem('localDropUserName') || '');
   const [myId, setMyId] = useState('');
   const [peers, setPeers] = useState([]);
   const [transfers, setTransfers] = useState({}); // id -> { files: [], currentFileIndex: 0, progress: 0, direction: 'sending'|'receiving' }
@@ -61,9 +62,20 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (socket && userName) {
+      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      const suffix = isMobile ? "'s Phone" : "'s Laptop";
+      const deviceName = `${userName}${suffix}`;
+      socket.emit('update-name', deviceName);
+    }
+  }, [socket, userName]);
+
   const createPeerConnection = (targetId, s) => {
+    // Empty iceServers ensures WebRTC will ONLY use local network IP addresses (host candidates).
+    // It will physically not be able to connect across the internet.
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      iceServers: []
     });
 
     pc.onicecandidate = (event) => {
@@ -283,19 +295,74 @@ function App() {
     }, 1000);
   };
 
+  if (!userName) {
+    return (
+      <div className="min-h-screen p-8 max-w-md mx-auto flex items-center justify-center">
+        <div className="bg-white rounded-2xl shadow-xl p-8 w-full z-10">
+          <h2 className="text-2xl font-bold mb-4 text-gray-800">Welcome to LocalDrop</h2>
+          <p className="text-gray-600 mb-6">Please enter your name to continue.</p>
+          <form onSubmit={(e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const name = formData.get('name').trim();
+            if (name) {
+              localStorage.setItem('localDropUserName', name);
+              setUserName(name);
+            }
+          }}>
+            <input 
+              type="text" 
+              name="name"
+              placeholder="Your Name (e.g. Ankit)" 
+              className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none mb-4"
+              autoFocus
+              required
+            />
+            <button 
+              type="submit"
+              className="w-full bg-blue-600 text-white font-semibold py-3 rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              Continue
+            </button>
+          </form>
+        </div>
+        <div className="fixed top-0 left-0 w-full h-full overflow-hidden -z-10 pointer-events-none">
+          <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-purple-300 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob"></div>
+          <div className="absolute top-[-10%] right-[-10%] w-96 h-96 bg-blue-300 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob animation-delay-2000"></div>
+          <div className="absolute bottom-[-20%] left-[20%] w-96 h-96 bg-pink-300 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob animation-delay-4000"></div>
+        </div>
+      </div>
+    );
+  }
+
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  const myDeviceName = `${userName}${isMobile ? "'s Phone" : "'s Laptop"}`;
+
   return (
     <div className="min-h-screen p-8 max-w-4xl mx-auto">
-      <div className="bg-white rounded-2xl shadow-xl p-8">
-        <div className="flex items-center justify-between mb-8 pb-6 border-b border-gray-100">
+      <div className="bg-white rounded-2xl shadow-xl p-8 z-10 relative">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-8 pb-6 border-b border-gray-100 gap-4">
           <div>
-            <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">Shivangee's personal assistant</h1>
+            <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">LocalDrop</h1>
             <p className="text-gray-500 mt-2">Share files securely over your local network.</p>
           </div>
-          <div className="text-right">
-            <span className="text-sm text-gray-400 block mb-1">Your ID</span>
-            <span className="font-mono bg-gray-100 text-gray-800 py-1 px-3 rounded text-lg font-medium">
-              {myId.substring(0, 6)}...
-            </span>
+          <div className="text-left sm:text-right flex-shrink-0">
+            <span className="text-sm text-gray-400 block mb-1">Visible as</span>
+            <div className="flex items-center gap-2">
+              <span className="bg-blue-50 text-blue-700 py-1.5 px-4 rounded-lg text-lg font-medium border border-blue-100">
+                {myDeviceName}
+              </span>
+              <button 
+                onClick={() => {
+                  localStorage.removeItem('localDropUserName');
+                  setUserName('');
+                }}
+                className="text-gray-400 hover:text-gray-600 p-2 rounded-full hover:bg-gray-100 transition-colors"
+                title="Change Name"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+              </button>
+            </div>
           </div>
         </div>
 
