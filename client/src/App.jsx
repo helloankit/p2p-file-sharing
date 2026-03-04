@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import JSZip from 'jszip';
+import confetti from 'canvas-confetti';
+import happyBabyImg from './happy-baby.jpg';
 
 const CHUNK_SIZE = 16 * 1024; // 16KB chunks
 
@@ -13,7 +15,8 @@ function App() {
   const [userName, setUserName] = useState(() => localStorage.getItem('localDropUserName') || '');
   const [myId, setMyId] = useState('');
   const [peers, setPeers] = useState([]);
-  const [transfers, setTransfers] = useState({}); // id -> { files: [], currentFileIndex: 0, progress: 0, direction: 'sending'|'receiving' }
+  const [transfers, setTransfers] = useState({}); // id -> { files: [], currentFileIndex: 0, progress: 0, direction: 'sending'|'receiving', startTime, fileCount }
+  const [successModal, setSuccessModal] = useState(null); // { peerName, fileCount, timeTaken, imageUrl }
   
   // Store active peer connections
   const peerConnections = useRef({});
@@ -136,10 +139,32 @@ function App() {
           const fileData = incomingFiles.current[peerId];
           const blob = new Blob(fileData.chunks, { type: fileData.metadata.type });
           downloadBlob(blob, fileData.metadata.name);
-          setTransfers(prev => ({
-            ...prev,
-            [peerId]: { ...prev[peerId], progress: 100, completed: true }
-          }));
+          
+          setTransfers(prev => {
+            const transfer = prev[peerId];
+            if (transfer) {
+              const timeTaken = ((Date.now() - transfer.startTime) / 1000).toFixed(1);
+              
+              // Only receiver shows success modal, sender shows it in sendFileData
+              setSuccessModal({
+                status: 'success',
+                peerName: peers.find(p => p.id === peerId)?.name || 'Device',
+                fileCount: transfer.fileCount || 1,
+                timeTaken,
+                imageUrl: happyBabyImg,
+                direction: 'received'
+              });
+              
+              triggerConfetti();
+              
+              return {
+                ...prev,
+                [peerId]: { ...transfer, progress: 100, completed: true }
+              };
+            }
+            return prev;
+          });
+          
           delete incomingFiles.current[peerId];
         }
       } else {
@@ -160,6 +185,33 @@ function App() {
         }
       }
     };
+  };
+
+  const triggerConfetti = () => {
+    const duration = 3000;
+    const end = Date.now() + duration;
+
+    const frame = () => {
+      confetti({
+        particleCount: 5,
+        angle: 60,
+        spread: 55,
+        origin: { x: 0 },
+        colors: ['#26ccff', '#a25afd', '#ff5e7e', '#88ff5a', '#fcff42', '#ffa62d', '#ff36ff']
+      });
+      confetti({
+        particleCount: 5,
+        angle: 120,
+        spread: 55,
+        origin: { x: 1 },
+        colors: ['#26ccff', '#a25afd', '#ff5e7e', '#88ff5a', '#fcff42', '#ffa62d', '#ff36ff']
+      });
+
+      if (Date.now() < end) {
+        requestAnimationFrame(frame);
+      }
+    };
+    frame();
   };
 
   const connectToPeer = async (targetId) => {
@@ -242,7 +294,9 @@ function App() {
         progress: 0, 
         direction: 'sending',
         completed: false,
-        isZipping: false
+        isZipping: false,
+        startTime: Date.now(),
+        fileCount: filesArray.length
       }
     }));
 
@@ -306,10 +360,31 @@ function App() {
         const finishTransfer = () => {
           if (channel.bufferedAmount === 0) {
             channel.send(JSON.stringify({ type: 'eof' }));
-            setTransfers(prev => ({
-              ...prev,
-              [targetId]: { ...prev[targetId], progress: 100, completed: true }
-            }));
+            
+            setTransfers(prev => {
+              const transfer = prev[targetId];
+              if (transfer) {
+                const timeTaken = ((Date.now() - transfer.startTime) / 1000).toFixed(1);
+                
+                setSuccessModal({
+                  status: 'success',
+                  peerName: peers.find(p => p.id === targetId)?.name || 'Device',
+                  fileCount: transfer.fileCount,
+                  timeTaken,
+                  imageUrl: happyBabyImg,
+                  direction: 'sent'
+                });
+                
+                triggerConfetti();
+                
+                return {
+                  ...prev,
+                  [targetId]: { ...transfer, progress: 100, completed: true }
+                };
+              }
+              return prev;
+            });
+            
           } else {
             setTimeout(finishTransfer, 50);
           }
@@ -517,6 +592,65 @@ function App() {
           )}
         </div>
       </div>
+
+      {/* Modal */}
+      {successModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setSuccessModal(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full transform transition-all scale-100" onClick={e => e.stopPropagation()}>
+            <div className={`w-16 h-16 ${successModal.status === 'success' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'} rounded-full flex items-center justify-center mx-auto mb-4`}>
+              {successModal.status === 'success' ? (
+                <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                </svg>
+              ) : (
+                <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              )}
+            </div>
+            
+            <h3 className="text-2xl font-bold text-center text-gray-800 mb-2">
+              {successModal.status === 'success' ? 'Success!' : 'Transfer Failed'}
+            </h3>
+            <p className="text-center text-gray-500 mb-6">
+              {successModal.status === 'success' ? (
+                successModal.direction === 'sent' 
+                  ? `Successfully sent to ${successModal.peerName}`
+                  : `Successfully received from ${successModal.peerName}`
+              ) : (
+                `Failed during transfer with ${successModal.peerName}. Please try again.`
+              )}
+            </p>
+
+            {successModal.status === 'success' && successModal.imageUrl && (
+              <div className="mb-6 rounded-xl overflow-hidden shadow-sm aspect-video bg-gray-50 flex items-center justify-center">
+                <img src={successModal.imageUrl} alt="Transfer Preview" className="w-full h-full object-cover" />
+              </div>
+            )}
+
+            {successModal.status === 'success' && (
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="bg-gray-50 rounded-xl p-4 text-center border border-gray-100">
+                  <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold mb-1">Files</p>
+                  <p className="text-xl font-bold text-gray-800">{successModal.fileCount}</p>
+                </div>
+                <div className="bg-gray-50 rounded-xl p-4 text-center border border-gray-100">
+                  <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold mb-1">Time</p>
+                  <p className="text-xl font-bold text-gray-800">{successModal.timeTaken}s</p>
+                </div>
+              </div>
+            )}
+
+            <button 
+              onClick={() => setSuccessModal(null)}
+              className={`w-full text-white font-semibold py-3 rounded-lg transition-colors ${successModal.status === 'success' ? 'bg-gray-900 hover:bg-gray-800' : 'bg-red-600 hover:bg-red-700'}`}
+            >
+              {successModal.status === 'success' ? "Done Let's Go" : 'Close'}
+            </button>
+          </div>
+        </div>
+      )}
+
 {/* Decorative background elements */}
 <div className="fixed top-0 left-0 w-full h-full overflow-hidden -z-10 pointer-events-none">
   <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-purple-300 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob"></div>
