@@ -18,12 +18,26 @@ const io = new Server(server, {
   }
 });
 
-const peers = new Map(); // socketId -> peerInfo
 const getClientIp = (socket) => {
-  return socket.handshake.headers['x-forwarded-for'] ||
-         socket.handshake.headers['x-real-ip'] ||
-         socket.conn.remoteAddress;
+  // Proxies like localtunnel or Render often append to x-forwarded-for, making it a comma-separated list
+  const forwarded = socket.handshake.headers['x-forwarded-for'];
+  if (forwarded) {
+    // The first IP is usually the real client IP
+    const ips = forwarded.split(',').map(ip => ip.trim());
+    return ips[0];
+  }
+  
+  const ip = socket.handshake.headers['x-real-ip'] || socket.conn.remoteAddress;
+  
+  // Normalize local IPs so testing on the same machine works
+  if (ip === '::1' || ip === '::ffff:127.0.0.1' || ip === '127.0.0.1') {
+    return 'localhost';
+  }
+  
+  return ip;
 };
+
+const peers = new Map();
 
 const broadcastPeers = (io) => {
   // Group peers by IP
