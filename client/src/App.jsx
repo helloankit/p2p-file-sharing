@@ -63,19 +63,24 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (socket && userName) {
+    if (socket && userName && myId) {
       const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
       const suffix = isMobile ? "'s Phone" : "'s Laptop";
       const deviceName = `${userName}${suffix}`;
       socket.emit('update-name', deviceName);
     }
-  }, [socket, userName]);
+  }, [socket, userName, myId]);
 
   const createPeerConnection = (targetId, s) => {
-    // Empty iceServers ensures WebRTC will ONLY use local network IP addresses (host candidates).
-    // It will physically not be able to connect across the internet.
+    // Mobile hotspots often enable "AP Isolation", which blocks devices on the same WiFi from talking directly to local IPs.
+    // We add a basic STUN server so WebRTC can discover public endpoints to punch through the hotspot's NAT. 
+    // The signaling server IP filtering still ensures you only see devices on your hotspot.
+    // Once established, the file bytes still flow peer-to-peer, not through Google.
     const pc = new RTCPeerConnection({
-      iceServers: []
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:global.stun.twilio.com:3478' } // Fallback STUN
+      ]
     });
 
     pc.onicecandidate = (event) => {
