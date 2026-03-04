@@ -11,7 +11,7 @@ function App() {
   const [socket, setSocket] = useState(null);
   const [myId, setMyId] = useState('');
   const [peers, setPeers] = useState([]);
-  const [transfers, setTransfers] = useState({}); // id -> { file, progress, direction }
+  const [transfers, setTransfers] = useState({}); // id -> { files: [], currentFileIndex: 0, progress: 0, direction: 'sending'|'receiving' }
   
   // Store active peer connections
   const peerConnections = useRef({});
@@ -150,6 +150,7 @@ function App() {
     const pc = createPeerConnection(targetId, socket);
     const dataChannel = pc.createDataChannel('fileTransfer');
     dataChannel.binaryType = 'arraybuffer';
+    dataChannel.bufferedAmountLowThreshold = 65536; // 64KB threshold for backpressure
     setupDataChannel(dataChannel, targetId);
     dataChannels.current[targetId] = dataChannel;
 
@@ -159,8 +160,11 @@ function App() {
     socket.emit('signal', { targetId, signalData: pc.localDescription });
   };
 
-  const sendFile = (targetId, file) => {
+  const sendFiles = (targetId, filesArray) => {
+    if (!filesArray || filesArray.length === 0) return;
+
     const channel = dataChannels.current[targetId];
+    
     // Ensure connection is established before sending
     if (!channel || channel.readyState !== 'open') {
       console.log('Connection not open, attempting to connect first...');
@@ -173,7 +177,7 @@ function App() {
         const checkChannel = dataChannels.current[targetId];
         if (checkChannel && checkChannel.readyState === 'open') {
           clearInterval(checkConnection);
-          sendFile(targetId, file); // Retry sending
+          sendFiles(targetId, filesArray); // Retry sending
         }
       }, 500);
       
@@ -184,7 +188,35 @@ function App() {
 
     setTransfers(prev => ({
       ...prev,
-      [targetId]: { fileName: file.name, progress: 0, direction: 'sending' }
+      [targetId]: { 
+        files: filesArray, 
+        currentFileIndex: 0, 
+        fileName: filesArray[0].name, 
+        progress: 0, 
+        direction: 'sending',
+        completed: false
+      }
+    }));
+
+    sendNextFile(targetId, filesArray, 0);
+  };
+
+  const sendNextFile = (targetId, filesArray, index) => {
+    if (index >= filesArray.length) {
+      // All files sent
+      setTransfers(prev => ({
+        ...prev,
+        [targetId]: { ...prev[targetId], progress: 100, completed: true }
+      }));
+      return;
+    }
+
+    const file = filesArray[index];
+    const channel = dataChannels.current[targetId];
+
+    setTransfers(prev => ({
+      ...prev,
+      [targetId]: { ...prev[targetId], currentFileIndex: index, fileName: file.name, progress: 0 }
     }));
 
     // Send metadata first
@@ -194,10 +226,15 @@ function App() {
     // Send chunks
     let offset = 0;
     const reader = new FileReader();
-    
+
+    const readNextChunk = () => {
+      const slice = file.slice(offset, offset + CHUNK_SIZE);
+      reader.readAsArrayBuffer(slice);
+    };
+
     reader.onload = (e) => {
       if (channel.readyState !== 'open') return;
-      
+
       channel.send(e.target.result);
       offset += e.target.result.byteLength;
       
@@ -208,20 +245,23 @@ function App() {
       }));
 
       if (offset < file.size) {
-        readNextChunk();
+        // Handle backpressure
+        if (channel.bufferedAmount > channel.bufferedAmountLowThreshold) {
+          channel.onbufferedamountlow = () => {
+            channel.onbufferedamountlow = null;
+            readNextChunk();
+          };
+        } else {
+          readNextChunk();
+        }
       } else {
-        // EOF
+        // EOF for this file
         channel.send(JSON.stringify({ type: 'eof' }));
-        setTransfers(prev => ({
-          ...prev,
-          [targetId]: { ...prev[targetId], progress: 100, completed: true }
-        }));
+        // Wait a tiny bit then send next file to avoid overwhelming the channel buffer
+        setTimeout(() => {
+          sendNextFile(targetId, filesArray, index + 1);
+        }, 100);
       }
-    };
-
-    const readNextChunk = () => {
-      const slice = file.slice(offset, offset + CHUNK_SIZE);
-      reader.readAsArrayBuffer(slice);
     };
 
     readNextChunk();
@@ -301,9 +341,10 @@ function App() {
                       type="file" 
                       id={`file-${peer.id}`} 
                       className="hidden" 
+                      multiple
                       onChange={(e) => {
                         if (e.target.files.length > 0) {
-                          sendFile(peer.id, e.target.files[0]);
+                          sendFiles(peer.id, Array.from(e.target.files));
                           e.target.value = null; // reset
                         }
                       }}
@@ -315,7 +356,7 @@ function App() {
                       <svg className="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                       </svg>
-                      <span className="font-medium">Send File</span>
+                      <span className="font-medium">Send File(s)</span>
                     </label>
                   </div>
 
@@ -326,6 +367,11 @@ function App() {
                           {transfers[peer.id].direction === 'sending' ? 'Sending: ' : 'Receiving: '}
                           {transfers[peer.id].fileName}
                         </p>
+                        {transfers[peer.id].files && transfers[peer.id].files.length > 1 && (
+                          <p className="text-xs text-gray-500 mb-1">
+                            File {transfers[peer.id].currentFileIndex + 1} of {transfers[peer.id].files.length}
+                          </p>
+                        )}
                         <p className="text-xs text-blue-600 font-medium">{transfers[peer.id].progress}%</p>
                       </div>
                       <div className="w-full bg-gray-100 rounded-full h-2.5 overflow-hidden">
